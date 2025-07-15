@@ -103,6 +103,25 @@ function extractComponentName(filePath: string): string {
     return fileName.charAt(0).toUpperCase() + fileName.slice(1)
 }
 
+function detectExportType(filePath: string, componentName: string): 'default' | 'named' {
+    try {
+        const fileContent = fs.readFileSync(filePath, "utf8")
+        
+        const defaultExportRegex = new RegExp(`export\\s+default\\s+(?:function\\s+)?${componentName}\\b|export\\s*\\{[^}]*${componentName}\\s+as\\s+default[^}]*\\}`)
+        const namedExportRegex = new RegExp(`export\\s+(?:const|let|var|function|class)\\s+${componentName}\\b|export\\s*\\{[^}]*\\b${componentName}\\b[^}]*\\}`)
+        
+        if (defaultExportRegex.test(fileContent)) {
+            return 'default'
+        } else if (namedExportRegex.test(fileContent)) {
+            return 'named'
+        }
+        
+        return 'default'
+    } catch (error) {
+        return 'default'
+    }
+}
+
 function generateTestContent(
     componentName: string,
     relativePath: string,
@@ -110,6 +129,7 @@ function generateTestContent(
     originalFilePath: string
 ): string {
     const importPath = calculateImportPath(relativePath)
+    const exportType = detectExportType(originalFilePath, componentName)
     
     let mockStatements = ""
     let imports = ""
@@ -132,9 +152,13 @@ function generateTestContent(
         // If we can't read the file, continue without mocks
     }
 
+    const importStatement = exportType === 'default' 
+        ? `import ${componentName} from "${importPath}"`
+        : `import { ${componentName} } from "${importPath}"`
+
     if (isReactFile) {
         return `${mockStatements}import { render, screen } from "@testing-library/react"
-import { ${componentName} } from "${importPath}"
+${importStatement}
 
 describe("${componentName}", () => {
     it("renders without crashing", () => {
@@ -151,7 +175,7 @@ describe("${componentName}", () => {
 })
 `
     } else {
-        return `${mockStatements}import { ${componentName} } from "${importPath}"
+        return `${mockStatements}${importStatement}
 
 describe("${componentName}", () => {
     it("should be defined", () => {
@@ -181,11 +205,30 @@ function extractImports(fileContent: string): string[] {
     return matches
 }
 
+function convertToAliasPath(relativePath: string): string {
+    let normalizedPath = relativePath
+    
+    if (normalizedPath.startsWith('./')) {
+        normalizedPath = normalizedPath.substring(2)
+    } else if (normalizedPath.startsWith('../')) {
+        normalizedPath = normalizedPath.replace(/^\.\.\//, '')
+        while (normalizedPath.startsWith('../')) {
+            normalizedPath = normalizedPath.replace(/^\.\.\//, '')
+        }
+    }
+    
+    return '@/' + normalizedPath
+}
+
 function generateMockStatement(importLine: string): string {
     const importMatch = importLine.match(/from\s+['"]([^'"]+)['"]/)
     if (!importMatch) return ""
     
-    const modulePath = importMatch[1]
+    let modulePath = importMatch[1]
+    
+    if (modulePath.startsWith('./') || modulePath.startsWith('../')) {
+        modulePath = convertToAliasPath(modulePath)
+    }
     
     const defaultImportMatch = importLine.match(/import\s+(\w+)\s+from/)
     const namedImportsMatch = importLine.match(/import\s+\{([^}]+)\}\s+from/)
@@ -250,9 +293,7 @@ function generateMockStatement(importLine: string): string {
 function calculateImportPath(relativePath: string): string {
     const parsedPath = path.parse(relativePath)
     const componentPath = path.join(parsedPath.dir, parsedPath.name)
-    const depth = componentPath.split(path.sep).length
-    const backPath = "../".repeat(depth + 1)
-    return backPath + componentPath.replace(/\\/g, "/")
+    return "@/" + componentPath.replace(/\\/g, "/")
 }
 
 async function createTestFile(
