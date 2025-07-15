@@ -56,7 +56,8 @@ export function activate(context: vscode.ExtensionContext) {
                 const testContent = generateTestContent(
                     componentName,
                     relativePath,
-                    isReactFile
+                    isReactFile,
+                    originalFilePath
                 )
 
                 await createTestFile(testFilePath, testContent)
@@ -105,12 +106,34 @@ function extractComponentName(filePath: string): string {
 function generateTestContent(
     componentName: string,
     relativePath: string,
-    isReactFile: boolean
+    isReactFile: boolean,
+    originalFilePath: string
 ): string {
     const importPath = calculateImportPath(relativePath)
+    
+    let mockStatements = ""
+    let imports = ""
+    
+    try {
+        const fileContent = fs.readFileSync(originalFilePath, "utf8")
+        const importLines = extractImports(fileContent)
+        
+        for (const importLine of importLines) {
+            const mockStatement = generateMockStatement(importLine)
+            if (mockStatement) {
+                mockStatements += mockStatement + "\n"
+            }
+        }
+        
+        if (mockStatements) {
+            mockStatements += "\n"
+        }
+    } catch (error) {
+        // If we can't read the file, continue without mocks
+    }
 
     if (isReactFile) {
-        return `import { render, screen } from "@testing-library/react"
+        return `${mockStatements}import { render, screen } from "@testing-library/react"
 import { ${componentName} } from "${importPath}"
 
 describe("${componentName}", () => {
@@ -128,7 +151,7 @@ describe("${componentName}", () => {
 })
 `
     } else {
-        return `import { ${componentName} } from "${importPath}"
+        return `${mockStatements}import { ${componentName} } from "${importPath}"
 
 describe("${componentName}", () => {
     it("should be defined", () => {
@@ -141,6 +164,87 @@ describe("${componentName}", () => {
 })
 `
     }
+}
+
+function extractImports(fileContent: string): string[] {
+    const importRegex = /^import\s+.*?from\s+['"]([^'"]+)['"];?$/gm
+    const matches = []
+    let match
+    
+    while ((match = importRegex.exec(fileContent)) !== null) {
+        const importPath = match[1]
+        if (!importPath.startsWith('@testing-library') && !importPath.startsWith('jest')) {
+            matches.push(match[0])
+        }
+    }
+    
+    return matches
+}
+
+function generateMockStatement(importLine: string): string {
+    const importMatch = importLine.match(/from\s+['"]([^'"]+)['"]/)
+    if (!importMatch) return ""
+    
+    const modulePath = importMatch[1]
+    
+    const defaultImportMatch = importLine.match(/import\s+(\w+)\s+from/)
+    const namedImportsMatch = importLine.match(/import\s+\{([^}]+)\}\s+from/)
+    const namespaceImportMatch = importLine.match(/import\s+\*\s+as\s+(\w+)\s+from/)
+    
+    let mockImplementation = "{"
+    
+    if (modulePath.includes('react') && !modulePath.includes('react-dom')) {
+        mockImplementation += `
+        __esModule: true,
+        default: () => null,
+        useState: jest.fn(),
+        useEffect: jest.fn(),
+        useContext: jest.fn(),
+        useMemo: jest.fn(),
+        useCallback: jest.fn(),
+        useRef: jest.fn(),
+        createElement: jest.fn(),
+        forwardRef: jest.fn()`
+    } else {
+        mockImplementation += `
+        __esModule: true`
+        
+        if (defaultImportMatch) {
+            const defaultImport = defaultImportMatch[1]
+            if (defaultImport.charAt(0) === defaultImport.charAt(0).toUpperCase()) {
+                mockImplementation += `,
+        default: jest.fn((props) => <div data-testid="mock-${defaultImport.toLowerCase()}">{JSON.stringify(props)}</div>)`
+            } else {
+                mockImplementation += `,
+        default: jest.fn()`
+            }
+        }
+        
+        if (namedImportsMatch) {
+            const namedImports = namedImportsMatch[1].split(',').map(imp => imp.trim())
+            for (const namedImport of namedImports) {
+                const cleanImport = namedImport.replace(/\s+as\s+\w+/, '').trim()
+                if (cleanImport.charAt(0) === cleanImport.charAt(0).toUpperCase()) {
+                    mockImplementation += `,
+        ${cleanImport}: jest.fn((props) => <div data-testid="mock-${cleanImport.toLowerCase()}">{JSON.stringify(props)}</div>)`
+                } else {
+                    mockImplementation += `,
+        ${cleanImport}: jest.fn()`
+                }
+            }
+        }
+        
+        if (namespaceImportMatch) {
+            const namespaceVar = namespaceImportMatch[1]
+            mockImplementation += `,
+        ${namespaceVar}: {}`
+        }
+    }
+    
+    mockImplementation += `
+    }`
+    
+    return `jest.mock('${modulePath}', () => (${mockImplementation}))`
 }
 
 function calculateImportPath(relativePath: string): string {
