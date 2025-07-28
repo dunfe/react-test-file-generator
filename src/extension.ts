@@ -66,6 +66,8 @@ export function activate(context: vscode.ExtensionContext) {
                     await vscode.workspace.openTextDocument(testFilePath)
                 await vscode.window.showTextDocument(doc)
 
+                await restartJestRunners()
+
                 vscode.window.showInformationMessage(
                     `Test file created: ${testFilePath}`
                 )
@@ -157,7 +159,8 @@ function generateTestContent(
         : `import { ${componentName} } from "${importPath}"`
 
     if (isReactFile) {
-        return `${mockStatements}import { render, screen } from "@testing-library/react"
+        return `${mockStatements}import "@testing-library/jest-dom"
+import { render, screen } from "@testing-library/react"
 ${importStatement}
 
 describe("${componentName}", () => {
@@ -175,7 +178,8 @@ describe("${componentName}", () => {
 })
 `
     } else {
-        return `${mockStatements}${importStatement}
+        return `${mockStatements}import "@testing-library/jest-dom"
+${importStatement}
 
 describe("${componentName}", () => {
     it("should be defined", () => {
@@ -220,6 +224,10 @@ function convertToAliasPath(relativePath: string): string {
     return '@/' + normalizedPath
 }
 
+function isConstantVariable(name: string): boolean {
+    return /^[A-Z_][A-Z0-9_]*$/.test(name)
+}
+
 function generateMockStatement(importLine: string): string {
     const importMatch = importLine.match(/from\s+['"]([^'"]+)['"]/)
     if (!importMatch) return ""
@@ -254,9 +262,14 @@ function generateMockStatement(importLine: string): string {
         
         if (defaultImportMatch) {
             const defaultImport = defaultImportMatch[1]
-            if (defaultImport.charAt(0) === defaultImport.charAt(0).toUpperCase()) {
+            if (isConstantVariable(defaultImport)) {
                 mockImplementation += `,
-        default: jest.fn((props) => <div data-testid="mock-${defaultImport.toLowerCase()}">{JSON.stringify(props)}</div>)`
+        default: '${defaultImport}'`
+            } else if (defaultImport.charAt(0) === defaultImport.charAt(0).toUpperCase()) {
+                mockImplementation += `,
+        default: jest.fn(({ children }) => (
+            <div data-testid="mock-${defaultImport.toLowerCase()}">{children}</div>
+        ))`
             } else {
                 mockImplementation += `,
         default: jest.fn()`
@@ -267,9 +280,14 @@ function generateMockStatement(importLine: string): string {
             const namedImports = namedImportsMatch[1].split(',').map(imp => imp.trim())
             for (const namedImport of namedImports) {
                 const cleanImport = namedImport.replace(/\s+as\s+\w+/, '').trim()
-                if (cleanImport.charAt(0) === cleanImport.charAt(0).toUpperCase()) {
+                if (isConstantVariable(cleanImport)) {
                     mockImplementation += `,
-        ${cleanImport}: jest.fn((props) => <div data-testid="mock-${cleanImport.toLowerCase()}">{JSON.stringify(props)}</div>)`
+        ${cleanImport}: '${cleanImport}'`
+                } else if (cleanImport.charAt(0) === cleanImport.charAt(0).toUpperCase()) {
+                    mockImplementation += `,
+        ${cleanImport}: jest.fn(({ children }) => (
+            <div data-testid="mock-${cleanImport.toLowerCase()}">{children}</div>
+        ))`
                 } else {
                     mockImplementation += `,
         ${cleanImport}: jest.fn()`
@@ -307,6 +325,16 @@ async function createTestFile(
     }
 
     fs.writeFileSync(filePath, content, "utf8")
+}
+
+async function restartJestRunners(): Promise<void> {
+    try {
+        await vscode.commands.executeCommand('jest.stop-all-runners')
+        await new Promise(resolve => setTimeout(resolve, 500))
+        await vscode.commands.executeCommand('jest.start')
+    } catch (error) {
+        console.log('Jest extension commands not available:', error)
+    }
 }
 
 export function deactivate() {}
